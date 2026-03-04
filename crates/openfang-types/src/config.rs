@@ -2193,6 +2193,22 @@ impl Default for BlueskyConfig {
     }
 }
 
+/// Feishu connection mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeishuConnectionMode {
+    /// HTTP webhook mode (requires public URL or intranet penetration).
+    Webhook,
+    /// WebSocket long connection mode (works from local environment).
+    WebSocket,
+}
+
+impl Default for FeishuConnectionMode {
+    fn default() -> Self {
+        Self::Webhook
+    }
+}
+
 /// Feishu/Lark Open Platform channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -2201,7 +2217,10 @@ pub struct FeishuConfig {
     pub app_id: String,
     /// Env var name holding the app secret.
     pub app_secret_env: String,
-    /// Port for the incoming webhook.
+    /// Connection mode (webhook or WebSocket).
+    #[serde(default)]
+    pub connection_mode: FeishuConnectionMode,
+    /// Port for the incoming webhook (only used in webhook mode).
     pub webhook_port: u16,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
@@ -2215,6 +2234,7 @@ impl Default for FeishuConfig {
         Self {
             app_id: String::new(),
             app_secret_env: "FEISHU_APP_SECRET".to_string(),
+            connection_mode: FeishuConnectionMode::Webhook,
             webhook_port: 8453,
             default_agent: None,
             overrides: ChannelOverrides::default(),
