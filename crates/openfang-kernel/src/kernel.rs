@@ -5274,6 +5274,59 @@ impl KernelHandle for OpenFangKernel {
         Ok(format!("Message sent to {} via {}", recipient, channel))
     }
 
+    async fn send_channel_media(
+        &self,
+        channel: &str,
+        recipient: &str,
+        media_type: &str,
+        media_url: &str,
+        caption: Option<&str>,
+        filename: Option<&str>,
+    ) -> Result<String, String> {
+        let adapter = self
+            .channel_adapters
+            .get(channel)
+            .ok_or_else(|| {
+                let available: Vec<String> = self
+                    .channel_adapters
+                    .iter()
+                    .map(|e| e.key().clone())
+                    .collect();
+                format!(
+                    "Channel '{}' not found. Available channels: {:?}",
+                    channel, available
+                )
+            })?
+            .clone();
+
+        let user = openfang_channels::types::ChannelUser {
+            platform_id: recipient.to_string(),
+            display_name: recipient.to_string(),
+            openfang_user: None,
+        };
+
+        let content = match media_type {
+            "image" => openfang_channels::types::ChannelContent::Image {
+                url: media_url.to_string(),
+                caption: caption.map(|s| s.to_string()),
+            },
+            "file" => openfang_channels::types::ChannelContent::File {
+                url: media_url.to_string(),
+                filename: filename.unwrap_or("file").to_string(),
+            },
+            _ => {
+                return Err(format!("Unsupported media type: '{media_type}'. Use 'image' or 'file'."));
+            }
+        };
+
+        adapter
+            .send(&user, content)
+            .await
+            .map_err(|e| format!("Channel media send failed: {e}"))?;
+
+        Ok(format!("{} sent to {} via {}", media_type, recipient, channel))
+    }
+
     async fn spawn_agent_checked(
         &self,
         manifest_toml: &str,

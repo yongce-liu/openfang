@@ -162,14 +162,27 @@ impl ModelCatalog {
             p.base_url = url.to_string();
             true
         } else {
-            false
+            // Custom provider — add a new entry so it appears in /api/providers
+            let env_var = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
+            self.providers.push(ProviderInfo {
+                id: provider.to_string(),
+                display_name: provider.to_string(),
+                api_key_env: env_var,
+                base_url: url.to_string(),
+                key_required: true,
+                auth_status: AuthStatus::Missing,
+                model_count: 0,
+            });
+            // Re-detect auth for the newly added provider
+            self.detect_auth();
+            true
         }
     }
 
     /// Apply a batch of provider URL overrides from config.
     ///
     /// Each entry maps a provider ID to a custom base URL.
-    /// Unknown providers are silently skipped.
+    /// Unknown providers are automatically added as custom OpenAI-compatible entries.
     /// Providers with explicit URL overrides are marked as configured since
     /// the user intentionally set them up (e.g. local proxies, custom endpoints).
     pub fn apply_url_overrides(&mut self, overrides: &HashMap<String, String>) {
@@ -3361,8 +3374,15 @@ mod tests {
     #[test]
     fn test_set_provider_url_unknown() {
         let mut catalog = ModelCatalog::new();
-        let updated = catalog.set_provider_url("nonexistent", "http://localhost:9999");
-        assert!(!updated);
+        let initial_count = catalog.list_providers().len();
+        let updated = catalog.set_provider_url("my-custom-llm", "http://localhost:9999");
+        // Unknown providers are now auto-registered as custom entries
+        assert!(updated);
+        assert_eq!(catalog.list_providers().len(), initial_count + 1);
+        assert_eq!(
+            catalog.get_provider("my-custom-llm").unwrap().base_url,
+            "http://localhost:9999"
+        );
     }
 
     #[test]
