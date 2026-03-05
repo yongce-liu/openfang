@@ -319,8 +319,11 @@ pub async fn send_message(
         .await
     {
         Ok(result) => {
+            // Strip <think>...</think> blocks from model output
+            let cleaned = crate::ws::strip_think_tags(&result.response);
+
             // Guard: ensure we never return an empty response to the client
-            let response = if result.response.trim().is_empty() {
+            let response = if cleaned.trim().is_empty() {
                 format!(
                     "[The agent completed processing but returned no text response. ({} in / {} out | {} iter)]",
                     result.total_usage.input_tokens,
@@ -328,7 +331,7 @@ pub async fn send_message(
                     result.iterations,
                 )
             } else {
-                result.response
+                cleaned
             };
             (
                 StatusCode::OK,
