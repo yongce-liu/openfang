@@ -402,6 +402,20 @@ pub struct FallbackProviderConfig {
     /// Base URL override (uses catalog default if None).
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Wire protocol for OpenAI-compatible providers.
+    #[serde(default)]
+    pub wire_api: WireApi,
+}
+
+/// Wire protocol variant for OpenAI-compatible providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WireApi {
+    /// Use the legacy Chat Completions API (`/v1/chat/completions`).
+    #[default]
+    ChatCompletions,
+    /// Use the newer Responses API (`/v1/responses`).
+    Responses,
 }
 
 /// Text-to-speech configuration.
@@ -1356,6 +1370,8 @@ pub struct DefaultModelConfig {
     pub api_key_env: String,
     /// Optional base URL override.
     pub base_url: Option<String>,
+    /// Wire protocol for OpenAI-compatible providers.
+    pub wire_api: WireApi,
 }
 
 impl Default for DefaultModelConfig {
@@ -1365,6 +1381,7 @@ impl Default for DefaultModelConfig {
             model: "claude-sonnet-4-20250514".to_string(),
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             base_url: None,
+            wire_api: WireApi::ChatCompletions,
         }
     }
 }
@@ -3558,6 +3575,7 @@ mod tests {
             model: "llama3.2:latest".to_string(),
             api_key_env: String::new(),
             base_url: None,
+            wire_api: WireApi::ChatCompletions,
         };
         let json = serde_json::to_string(&fb).unwrap();
         let back: FallbackProviderConfig = serde_json::from_str(&json).unwrap();
@@ -3565,6 +3583,7 @@ mod tests {
         assert_eq!(back.model, "llama3.2:latest");
         assert!(back.api_key_env.is_empty());
         assert!(back.base_url.is_none());
+        assert_eq!(back.wire_api, WireApi::ChatCompletions);
     }
 
     #[test]
@@ -3584,11 +3603,28 @@ mod tests {
             provider = "groq"
             model = "llama-3.3-70b-versatile"
             api_key_env = "GROQ_API_KEY"
+            wire_api = "responses"
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.fallback_providers.len(), 2);
         assert_eq!(config.fallback_providers[0].provider, "ollama");
         assert_eq!(config.fallback_providers[1].provider, "groq");
+        assert_eq!(config.fallback_providers[1].wire_api, WireApi::Responses);
+    }
+
+    #[test]
+    fn test_default_model_wire_api_in_toml() {
+        let toml_str = r#"
+            [default_model]
+            provider = "openai"
+            model = "gpt-5.4"
+            api_key_env = "OPENAI_API_KEY"
+            wire_api = "responses"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.default_model.provider, "openai");
+        assert_eq!(config.default_model.model, "gpt-5.4");
+        assert_eq!(config.default_model.wire_api, WireApi::Responses);
     }
 
     #[test]

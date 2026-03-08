@@ -5,6 +5,7 @@
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
 use futures::StreamExt;
+use openfang_types::config::WireApi;
 use openfang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use openfang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
@@ -15,16 +16,18 @@ use zeroize::Zeroizing;
 pub struct OpenAIDriver {
     api_key: Zeroizing<String>,
     base_url: String,
+    wire_api: WireApi,
     client: reqwest::Client,
     extra_headers: Vec<(String, String)>,
 }
 
 impl OpenAIDriver {
     /// Create a new OpenAI-compatible driver.
-    pub fn new(api_key: String, base_url: String) -> Self {
+    pub fn new(api_key: String, base_url: String, wire_api: WireApi) -> Self {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
+            wire_api,
             client: reqwest::Client::new(),
             extra_headers: Vec::new(),
         }
@@ -34,6 +37,191 @@ impl OpenAIDriver {
     pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.extra_headers = headers;
         self
+    }
+
+    fn uses_responses_api(&self) -> bool {
+        matches!(self.wire_api, WireApi::Responses)
+    }
+
+    fn apply_auth_headers(
+        &self,
+        mut req_builder: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        if !self.api_key.as_str().is_empty() {
+            req_builder = req_builder
+                .header("authorization", format!("Bearer {}", self.api_key.as_str()));
+        }
+        for (k, v) in &self.extra_headers {
+            req_builder = req_builder.header(k, v);
+        }
+        req_builder
+    }
+
+    async fn complete_responses(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, LlmError> {
+        let input = build_responses_input(&request);
+        let oai_tools: Vec<OaiTool> = request
+            .tools
+            .iter()
+            .map(|t| OaiTool {
+                tool_type: "function".to_string(),
+                function: OaiToolDef {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: openfang_types::tool::normalize_schema_for_provider(
+                        &t.input_schema,
+                        "openai",
+                    ),
+                },
+            })
+            .collect();
+
+        let tool_choice = if oai_tools.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!("auto"))
+        };
+
+        let mut responses_request = ResponsesRequest {
+            model: request.model.clone(),
+            input,
+            max_output_tokens: Some(request.max_tokens),
+            temperature: if rejects_temperature(&request.model) {
+                None
+            } else {
+                Some(request.temperature)
+            },
+            tools: oai_tools,
+            tool_choice,
+            stream: false,
+        };
+
+        let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
+        let max_retries = 3;
+        for attempt in 0..=max_retries {
+            debug!(url = %url, attempt, "Sending OpenAI Responses API request");
+
+            let req_builder = self
+                .client
+                .post(&url)
+                .header("content-type", "application/json")
+                .json(&responses_request);
+            let resp = self
+                .apply_auth_headers(req_builder)
+                .send()
+                .await
+                .map_err(|e| LlmError::Http(e.to_string()))?;
+
+            let status = resp.status().as_u16();
+            if status == 429 {
+                if attempt < max_retries {
+                    let retry_ms = (attempt + 1) as u64 * 2000;
+                    warn!(status, retry_ms, "Rate limited, retrying Responses API request");
+                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    continue;
+                }
+                return Err(LlmError::RateLimited {
+                    retry_after_ms: 5000,
+                });
+            }
+            if status == 529 || status >= 500 {
+                if attempt < max_retries {
+                    let retry_ms = (attempt + 1) as u64 * 1500;
+                    warn!(status, retry_ms, "OpenAI Responses API overloaded, retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    continue;
+                }
+                return Err(LlmError::Overloaded {
+                    retry_after_ms: 5000,
+                });
+            }
+
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+
+                if status == 400
+                    && body.contains("temperature")
+                    && body.contains("unsupported_parameter")
+                    && responses_request.temperature.is_some()
+                    && attempt < max_retries
+                {
+                    warn!(model = %responses_request.model, "Stripping temperature for Responses API model");
+                    responses_request.temperature = None;
+                    continue;
+                }
+
+                if status == 400
+                    && body.contains("max_output_tokens")
+                    && attempt < max_retries
+                {
+                    let current = responses_request.max_output_tokens.unwrap_or(4096);
+                    let cap = extract_max_tokens_limit(&body).unwrap_or(current / 2).max(1);
+                    warn!(old = current, new = cap, "Auto-capping max_output_tokens to model limit");
+                    responses_request.max_output_tokens = Some(cap);
+                    continue;
+                }
+
+                return Err(LlmError::Api {
+                    status,
+                    message: body,
+                });
+            }
+
+            let value: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| LlmError::Parse(e.to_string()))?;
+            return parse_responses_completion(value);
+        }
+
+        Err(LlmError::Api {
+            status: 0,
+            message: "Max retries exceeded".to_string(),
+        })
+    }
+
+    async fn stream_responses(
+        &self,
+        request: CompletionRequest,
+        tx: tokio::sync::mpsc::Sender<StreamEvent>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let response = self.complete_responses(request).await?;
+
+        let text = response.text();
+        if !text.is_empty() {
+            let _ = tx.send(StreamEvent::TextDelta { text }).await;
+        }
+
+        for tool_call in &response.tool_calls {
+            let _ = tx
+                .send(StreamEvent::ToolUseStart {
+                    id: tool_call.id.clone(),
+                    name: tool_call.name.clone(),
+                })
+                .await;
+            let input_text = serde_json::to_string(&tool_call.input).unwrap_or_default();
+            if !input_text.is_empty() {
+                let _ = tx.send(StreamEvent::ToolInputDelta { text: input_text }).await;
+            }
+            let _ = tx
+                .send(StreamEvent::ToolUseEnd {
+                    id: tool_call.id.clone(),
+                    name: tool_call.name.clone(),
+                    input: tool_call.input.clone(),
+                })
+                .await;
+        }
+
+        let _ = tx
+            .send(StreamEvent::ContentComplete {
+                stop_reason: response.stop_reason,
+                usage: response.usage,
+            })
+            .await;
+
+        Ok(response)
     }
 }
 
@@ -164,9 +352,246 @@ struct OaiUsage {
     completion_tokens: u64,
 }
 
+#[derive(Debug, Serialize)]
+struct ResponsesRequest {
+    model: String,
+    input: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OaiTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
+}
+
+fn build_responses_input(request: &CompletionRequest) -> Vec<serde_json::Value> {
+    let mut input = Vec::new();
+
+    if let Some(system) = &request.system {
+        input.push(serde_json::json!({
+            "role": "system",
+            "content": system,
+        }));
+    }
+
+    for msg in &request.messages {
+        match (&msg.role, &msg.content) {
+            (Role::System, MessageContent::Text(text)) => {
+                if request.system.is_none() {
+                    input.push(serde_json::json!({
+                        "role": "system",
+                        "content": text,
+                    }));
+                }
+            }
+            (Role::User, MessageContent::Text(text)) => {
+                input.push(serde_json::json!({
+                    "role": "user",
+                    "content": text,
+                }));
+            }
+            (Role::Assistant, MessageContent::Text(text)) => {
+                input.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": text,
+                }));
+            }
+            (Role::User, MessageContent::Blocks(blocks)) => {
+                let mut parts = Vec::new();
+                for block in blocks {
+                    match block {
+                        ContentBlock::Text { text } => parts.push(serde_json::json!({
+                            "type": "input_text",
+                            "text": text,
+                        })),
+                        ContentBlock::Image { media_type, data } => parts.push(serde_json::json!({
+                            "type": "input_image",
+                            "image_url": format!("data:{media_type};base64,{data}"),
+                        })),
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => {
+                            if !parts.is_empty() {
+                                input.push(serde_json::json!({
+                                    "role": "user",
+                                    "content": parts,
+                                }));
+                                parts = Vec::new();
+                            }
+                            input.push(serde_json::json!({
+                                "type": "function_call_output",
+                                "call_id": tool_use_id,
+                                "output": if content.is_empty() { "(empty)" } else { content },
+                            }));
+                        }
+                        ContentBlock::Thinking { .. } | ContentBlock::ToolUse { .. } | ContentBlock::Unknown => {}
+                    }
+                }
+                if !parts.is_empty() {
+                    input.push(serde_json::json!({
+                        "role": "user",
+                        "content": parts,
+                    }));
+                }
+            }
+            (Role::Assistant, MessageContent::Blocks(blocks)) => {
+                let mut text_parts = Vec::new();
+                for block in blocks {
+                    match block {
+                        ContentBlock::Text { text } => text_parts.push(text.clone()),
+                        ContentBlock::ToolUse { id, name, input: tool_input } => {
+                            if !text_parts.is_empty() {
+                                input.push(serde_json::json!({
+                                    "role": "assistant",
+                                    "content": text_parts.join(""),
+                                }));
+                                text_parts.clear();
+                            }
+                            input.push(serde_json::json!({
+                                "type": "function_call",
+                                "call_id": id,
+                                "name": name,
+                                "arguments": serde_json::to_string(tool_input).unwrap_or_default(),
+                            }));
+                        }
+                        ContentBlock::Thinking { .. } | ContentBlock::ToolResult { .. } | ContentBlock::Image { .. } | ContentBlock::Unknown => {}
+                    }
+                }
+                if !text_parts.is_empty() {
+                    input.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": text_parts.join(""),
+                    }));
+                }
+            }
+            (Role::System, MessageContent::Blocks(blocks)) => {
+                let text = blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.is_empty() && request.system.is_none() {
+                    input.push(serde_json::json!({
+                        "role": "system",
+                        "content": text,
+                    }));
+                }
+            }
+        }
+    }
+
+    input
+}
+
+fn parse_responses_completion(value: serde_json::Value) -> Result<CompletionResponse, LlmError> {
+    let usage = TokenUsage {
+        input_tokens: value
+            .pointer("/usage/input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        output_tokens: value
+            .pointer("/usage/output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    };
+
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+    let mut content = Vec::new();
+
+    if let Some(output) = value.get("output").and_then(|v| v.as_array()) {
+        for item in output {
+            match item.get("type").and_then(|v| v.as_str()) {
+                Some("message") => {
+                    if let Some(parts) = item.get("content").and_then(|v| v.as_array()) {
+                        for part in parts {
+                            match part.get("type").and_then(|v| v.as_str()) {
+                                Some("output_text") | Some("text") => {
+                                    if let Some(part_text) = part.get("text").and_then(|v| v.as_str()) {
+                                        text.push_str(part_text);
+                                    }
+                                }
+                                Some("refusal") => {
+                                    if let Some(part_text) = part.get("refusal").and_then(|v| v.as_str()) {
+                                        text.push_str(part_text);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    let id = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
+                    let input: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+                    tool_calls.push(ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                    });
+                    content.push(ContentBlock::ToolUse { id, name, input });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if text.is_empty() {
+        if let Some(output_text) = value.get("output_text").and_then(|v| v.as_str()) {
+            text.push_str(output_text);
+        }
+    }
+
+    if !text.is_empty() {
+        content.insert(0, ContentBlock::Text { text });
+    }
+
+    let stop_reason = if !tool_calls.is_empty() {
+        StopReason::ToolUse
+    } else if value.get("status").and_then(|v| v.as_str()) == Some("incomplete") {
+        StopReason::MaxTokens
+    } else {
+        StopReason::EndTurn
+    };
+
+    Ok(CompletionResponse {
+        content,
+        stop_reason,
+        tool_calls,
+        usage,
+    })
+}
+
 #[async_trait]
 impl LlmDriver for OpenAIDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        if self.uses_responses_api() {
+            return self.complete_responses(request).await;
+        }
+
         let mut oai_messages: Vec<OaiMessage> = Vec::new();
 
         // Add system message if present
@@ -532,6 +957,10 @@ impl LlmDriver for OpenAIDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
+        if self.uses_responses_api() {
+            return self.stream_responses(request, tx).await;
+        }
+
         // Build request (same as complete but with stream: true)
         let mut oai_messages: Vec<OaiMessage> = Vec::new();
 
@@ -1076,11 +1505,92 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openfang_types::config::WireApi;
 
     #[test]
     fn test_openai_driver_creation() {
-        let driver = OpenAIDriver::new("test-key".to_string(), "http://localhost".to_string());
+        let driver = OpenAIDriver::new(
+            "test-key".to_string(),
+            "http://localhost".to_string(),
+            WireApi::ChatCompletions,
+        );
         assert_eq!(driver.api_key.as_str(), "test-key");
+    }
+
+    #[test]
+    fn test_parse_responses_completion_text() {
+        let value = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "hello from responses"}
+                    ]
+                }
+            ],
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 7
+            }
+        });
+
+        let resp = parse_responses_completion(value).unwrap();
+        assert_eq!(resp.text(), "hello from responses");
+        assert_eq!(resp.stop_reason, StopReason::EndTurn);
+        assert!(resp.tool_calls.is_empty());
+        assert_eq!(resp.usage.input_tokens, 12);
+        assert_eq!(resp.usage.output_tokens, 7);
+    }
+
+    #[test]
+    fn test_parse_responses_completion_tool_call() {
+        let value = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "web_fetch",
+                    "arguments": "{\"url\":\"https://example.com\"}"
+                }
+            ]
+        });
+
+        let resp = parse_responses_completion(value).unwrap();
+        assert_eq!(resp.stop_reason, StopReason::ToolUse);
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].id, "call_123");
+        assert_eq!(resp.tool_calls[0].name, "web_fetch");
+        assert_eq!(resp.tool_calls[0].input["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_build_responses_input_tool_result() {
+        let request = CompletionRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![openfang_types::message::Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_42".to_string(),
+                    tool_name: "web_fetch".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                }]),
+            }],
+            tools: vec![],
+            max_tokens: 16,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+        };
+
+        let input = build_responses_input(&request);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_42");
+        assert_eq!(input[0]["output"], "ok");
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use crate::tool::ToolDefinition;
 use chrono::{DateTime, Utc};
+use crate::config::WireApi;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -379,6 +380,8 @@ pub struct ModelConfig {
     pub api_key_env: Option<String>,
     /// Optional base URL override for the provider.
     pub base_url: Option<String>,
+    /// Optional wire protocol override for OpenAI-compatible providers.
+    pub wire_api: Option<WireApi>,
 }
 
 impl Default for ModelConfig {
@@ -391,6 +394,7 @@ impl Default for ModelConfig {
             system_prompt: "You are a helpful AI agent.".to_string(),
             api_key_env: None,
             base_url: None,
+            wire_api: None,
         }
     }
 }
@@ -404,6 +408,8 @@ pub struct FallbackModel {
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub wire_api: Option<WireApi>,
 }
 
 /// Tool configuration within an agent manifest.
@@ -964,12 +970,14 @@ mod tests {
             model: "llama-3.3-70b".to_string(),
             api_key_env: Some("GROQ_API_KEY".to_string()),
             base_url: None,
+            wire_api: Some(WireApi::Responses),
         };
         let json = serde_json::to_string(&fb).unwrap();
         let back: FallbackModel = serde_json::from_str(&json).unwrap();
         assert_eq!(back.provider, "groq");
         assert_eq!(back.model, "llama-3.3-70b");
         assert_eq!(back.api_key_env, Some("GROQ_API_KEY".to_string()));
+        assert_eq!(back.wire_api, Some(WireApi::Responses));
     }
 
     #[test]
@@ -981,6 +989,7 @@ mod tests {
                 model: "llama-3.3-70b".to_string(),
                 api_key_env: None,
                 base_url: None,
+                wire_api: Some(WireApi::Responses),
             }],
             ..Default::default()
         };

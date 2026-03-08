@@ -10,6 +10,7 @@ provider = "anthropic"                    # "anthropic", "gemini", "openai", "gr
 model = "claude-sonnet-4-20250514"        # Model identifier
 api_key_env = "ANTHROPIC_API_KEY"         # Environment variable holding API key
 # base_url = "https://api.anthropic.com"  # Optional: override API endpoint
+# wire_api = "responses"                  # Optional: for OpenAI-compatible gateways that only expose /v1/responses
 
 [memory]
 decay_rate = 0.05                         # Memory confidence decay rate

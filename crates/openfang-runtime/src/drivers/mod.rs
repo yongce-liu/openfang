@@ -286,7 +286,11 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             .base_url
             .clone()
             .unwrap_or_else(|| OPENAI_BASE_URL.to_string());
-        return Ok(Arc::new(openai::OpenAIDriver::new(api_key, base_url)));
+        return Ok(Arc::new(openai::OpenAIDriver::new(
+            api_key,
+            base_url,
+            config.wire_api,
+        )));
     }
 
     // Claude Code CLI — subprocess-based, no API key needed
@@ -338,7 +342,11 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             .clone()
             .unwrap_or_else(|| defaults.base_url.to_string());
 
-        return Ok(Arc::new(openai::OpenAIDriver::new(api_key, base_url)));
+        return Ok(Arc::new(openai::OpenAIDriver::new(
+            api_key,
+            base_url,
+            config.wire_api,
+        )));
     }
 
     // Unknown provider — if base_url is set, treat as custom OpenAI-compatible
@@ -347,6 +355,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
         return Ok(Arc::new(openai::OpenAIDriver::new(
             api_key,
             base_url.clone(),
+            config.wire_api,
         )));
     }
 
@@ -434,6 +443,7 @@ pub fn known_providers() -> &'static [&'static str] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openfang_types::config::WireApi;
 
     #[test]
     fn test_provider_defaults_groq() {
@@ -467,6 +477,7 @@ mod tests {
             provider: "my-custom-llm".to_string(),
             api_key: Some("test".to_string()),
             base_url: Some("http://localhost:9999/v1".to_string()),
+            wire_api: WireApi::ChatCompletions,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -478,6 +489,7 @@ mod tests {
             provider: "nonexistent".to_string(),
             api_key: None,
             base_url: None,
+            wire_api: WireApi::ChatCompletions,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());

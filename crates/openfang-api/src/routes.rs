@@ -5709,7 +5709,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
         // For local providers, add reachability info via health probe
         if !p.key_required {
             entry["is_local"] = serde_json::json!(true);
-            let probe = openfang_runtime::provider_health::probe_provider(&p.id, &p.base_url).await;
+            let probe = openfang_runtime::provider_health::probe_provider(&p.id, &p.base_url, None).await;
             entry["reachable"] = serde_json::json!(probe.reachable);
             entry["latency_ms"] = serde_json::json!(probe.latency_ms);
             if !probe.discovered_models.is_empty() {
@@ -6962,7 +6962,7 @@ pub async fn test_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let (env_var, base_url, key_required, default_model) = {
+    let (env_var, base_url, key_required, default_model, wire_api) = {
         let catalog = state
             .kernel
             .model_catalog
@@ -6974,11 +6974,29 @@ pub async fn test_provider(
                 let model_id = catalog
                     .default_model_for_provider(&name)
                     .unwrap_or_default();
+                let configured = if state.kernel.config.default_model.provider == name {
+                    Some((
+                        state.kernel.config.default_model.model.clone(),
+                        state.kernel.config.default_model.wire_api,
+                    ))
+                } else {
+                    state
+                        .kernel
+                        .config
+                        .fallback_providers
+                        .iter()
+                        .find(|fb| fb.provider == name)
+                        .map(|fb| (fb.model.clone(), fb.wire_api))
+                };
+                let (model_id, wire_api) = configured
+                    .filter(|(model, _)| !model.is_empty())
+                    .unwrap_or((model_id, openfang_types::config::WireApi::ChatCompletions));
                 (
                     p.api_key_env.clone(),
                     p.base_url.clone(),
                     p.key_required,
                     model_id,
+                    wire_api,
                 )
             }
             None => {
@@ -7009,6 +7027,7 @@ pub async fn test_provider(
         } else {
             Some(base_url)
         },
+        wire_api,
     };
 
     match openfang_runtime::drivers::create_driver(&driver_config) {
@@ -7101,7 +7120,23 @@ pub async fn set_provider_url(
     }
 
     // Probe reachability at the new URL
-    let probe = openfang_runtime::provider_health::probe_provider(&name, &base_url).await;
+    let probe_api_key = {
+        let catalog = state
+            .kernel
+            .model_catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog
+            .get_provider(&name)
+            .and_then(|p| std::env::var(&p.api_key_env).ok())
+    };
+
+    let probe = openfang_runtime::provider_health::probe_provider(
+        &name,
+        &base_url,
+        probe_api_key.as_deref(),
+    )
+    .await;
 
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {

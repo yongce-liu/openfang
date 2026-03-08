@@ -96,6 +96,7 @@ provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
 # base_url = "https://api.anthropic.com"  # Optional override
+# wire_api = "responses"                  # Optional for OpenAI-compatible /v1/responses gateways
 
 # --- Fallback Providers ---
 [[fallback_providers]]
@@ -103,6 +104,7 @@ provider = "ollama"
 model = "llama3.2:latest"
 api_key_env = ""
 # base_url = "http://localhost:11434"  # Uses catalog default if omitted
+# wire_api = "chat_completions"         # Optional; defaults to chat_completions
 
 [[fallback_providers]]
 provider = "groq"
