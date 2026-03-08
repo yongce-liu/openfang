@@ -22,7 +22,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
 /// Feishu tenant access token endpoint.
@@ -663,29 +663,29 @@ pub mod pbbp2 {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Frame {
-        pub SeqID: u32,
-        pub LogID: u32,
+        pub seq_id: u32,
+        pub log_id: u32,
         pub service: u32,
         pub method: u32,
         pub headers: Vec<Header>,
         pub payload_encoding: String,
         pub payload_type: String,
         pub payload: Vec<u8>,
-        pub LogIDNew: String,
+        pub log_id_new: String,
     }
 
     impl Default for Frame {
         fn default() -> Self {
             Self {
-                SeqID: 0,
-                LogID: 0,
+                seq_id: 0,
+                log_id: 0,
                 service: 0,
                 method: 0,
                 headers: Vec::new(),
                 payload_encoding: String::new(),
                 payload_type: String::new(),
                 payload: Vec::new(),
-                LogIDNew: String::new(),
+                log_id_new: String::new(),
             }
         }
     }
@@ -735,8 +735,8 @@ pub mod pbbp2 {
         pub fn encode(&self) -> Vec<u8> {
             let mut buf = Vec::new();
 
-            encode_uint32(1, self.SeqID, &mut buf);
-            encode_uint32(2, self.LogID, &mut buf);
+            encode_uint32(1, self.seq_id, &mut buf);
+            encode_uint32(2, self.log_id, &mut buf);
             encode_uint32(3, self.service, &mut buf);
             encode_uint32(4, self.method, &mut buf);
 
@@ -753,8 +753,8 @@ pub mod pbbp2 {
             if !self.payload.is_empty() {
                 encode_bytes(8, &self.payload, &mut buf);
             }
-            if !self.LogIDNew.is_empty() {
-                encode_string(9, &self.LogIDNew, &mut buf);
+            if !self.log_id_new.is_empty() {
+                encode_string(9, &self.log_id_new, &mut buf);
             }
 
             buf
@@ -770,8 +770,8 @@ pub mod pbbp2 {
                 let wire_type = (tag & 0x07) as u32;
 
                 match field_number {
-                    1 => frame.SeqID = read_varint(&mut cursor)? as u32,
-                    2 => frame.LogID = read_varint(&mut cursor)? as u32,
+                    1 => frame.seq_id = read_varint(&mut cursor)? as u32,
+                    2 => frame.log_id = read_varint(&mut cursor)? as u32,
                     3 => frame.service = read_varint(&mut cursor)? as u32,
                     4 => frame.method = read_varint(&mut cursor)? as u32,
                     5 => {
@@ -816,7 +816,7 @@ pub mod pbbp2 {
                     9 => {
                         let len = read_varint(&mut cursor)? as usize;
                         let pos = cursor.position() as usize;
-                        frame.LogIDNew = String::from_utf8_lossy(&data[pos..pos + len]).to_string();
+                        frame.log_id_new = String::from_utf8_lossy(&data[pos..pos + len]).to_string();
                         cursor.advance(len);
                     }
                     _ => {
@@ -871,7 +871,8 @@ struct WsConfigResponse {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct WsConfigData {
-    URL: String,
+    #[serde(rename = "URL")]
+    url: String,
     #[serde(rename = "ClientConfig")]
     client_config: ClientConfig,
 }
@@ -880,19 +881,12 @@ struct WsConfigData {
 struct ClientConfig {
     #[serde(rename = "PingInterval")]
     ping_interval: u64,
-    #[serde(rename = "ReconnectCount")]
-    reconnect_count: i32,
-    #[serde(rename = "ReconnectInterval")]
-    reconnect_interval: u64,
-    #[serde(rename = "ReconnectNonce")]
-    reconnect_nonce: u32,
 }
 
 /// Cache for fragmented message data
 #[derive(Debug, Default)]
 struct DataCache {
     fragments: HashMap<u32, Vec<Vec<u8>>>,
-    expected_seqs: HashMap<u32, u32>,
 }
 
 impl DataCache {
@@ -933,15 +927,15 @@ fn create_frame(
     payload: Vec<u8>,
 ) -> Vec<u8> {
     let frame = pbbp2::Frame {
-        SeqID: seq_id,
-        LogID: 0,
+        seq_id,
+        log_id: 0,
         service,
         method,
         headers,
         payload_encoding: "gzip".to_string(),
         payload_type: "json".to_string(),
         payload,
-        LogIDNew: String::new(),
+        log_id_new: String::new(),
     };
 
     frame.encode()
@@ -991,7 +985,7 @@ pub async fn start_feishu_websocket(
         return Err(format!("WebSocket config returned error code: {}", config_data.code).into());
     }
 
-    let ws_url = config_data.data.URL;
+    let ws_url = config_data.data.url;
     let ping_interval = config_data.data.client_config.ping_interval;
     info!("Feishu: Connecting to WebSocket at {} (ping_interval: {}s)", ws_url, ping_interval);
 
@@ -1097,7 +1091,7 @@ pub async fn start_feishu_websocket(
                                             .find(|h| h.key == "sum")
                                             .and_then(|h| h.value.parse::<u32>().ok());
 
-                                        let current_seq = frame.SeqID;
+                                        let current_seq = frame.seq_id;
 
                                         if let Some(total) = sum {
                                             if total > 1 {
