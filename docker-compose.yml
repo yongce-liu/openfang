@@ -5,7 +5,7 @@
 services:
   openfang:
     build: .
-    # image: ghcr.io/rightnow-ai/openfang:latest  # Uncomment when GHCR is public
+    # image: openfang:latest
     ports:
       - "[::]:14200:4200"
     volumes:
