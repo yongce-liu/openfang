@@ -555,6 +555,7 @@ impl OpenFangKernel {
                 .base_url
                 .clone()
                 .or_else(|| config.provider_urls.get(&config.default_model.provider).cloned()),
+            wire_api: config.default_model.wire_api,
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
         // even if the LLM provider is misconfigured. Users can fix config via dashboard.
@@ -575,6 +576,7 @@ impl OpenFangKernel {
                         provider: provider.to_string(),
                         api_key: std::env::var(env_var).ok(),
                         base_url: config.provider_urls.get(provider).cloned(),
+                        wire_api: openfang_types::config::WireApi::ChatCompletions,
                     };
                     match drivers::create_driver(&auto_config) {
                         Ok(d) => {
@@ -616,6 +618,7 @@ impl OpenFangKernel {
                     .base_url
                     .clone()
                     .or_else(|| config.provider_urls.get(&fb.provider).cloned()),
+                wire_api: fb.wire_api,
             };
             match drivers::create_driver(&fb_config) {
                 Ok(d) => {
@@ -1123,6 +1126,7 @@ impl OpenFangKernel {
                         Some(dm.api_key_env.clone())
                     },
                     base_url: dm.base_url.clone(),
+                    wire_api: Some(dm.wire_api),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -2940,6 +2944,7 @@ impl OpenFangKernel {
                 system_prompt: def.agent.system_prompt.clone(),
                 api_key_env: def.agent.api_key_env.clone(),
                 base_url: def.agent.base_url.clone(),
+                wire_api: None,
             },
             capabilities: ManifestCapabilities {
                 tools: def.tools.clone(),
@@ -3429,7 +3434,7 @@ impl OpenFangKernel {
 
                 for (provider_id, base_url) in &local_providers {
                     let result =
-                        openfang_runtime::provider_health::probe_provider(provider_id, base_url)
+                        openfang_runtime::provider_health::probe_provider(provider_id, base_url, None)
                             .await;
                     if result.reachable {
                         info!(
@@ -3920,8 +3925,13 @@ impl OpenFangKernel {
         // If agent uses same provider as kernel default and has no custom overrides, reuse
         let has_custom_key = manifest.model.api_key_env.is_some();
         let has_custom_url = manifest.model.base_url.is_some();
+        let has_custom_wire = manifest.model.wire_api.is_some();
 
-        let primary = if agent_provider == default_provider && !has_custom_key && !has_custom_url {
+        let primary = if agent_provider == default_provider
+            && !has_custom_key
+            && !has_custom_url
+            && !has_custom_wire
+        {
             Arc::clone(&self.default_driver)
         } else {
             // Create a dedicated driver for this agent.
@@ -3968,10 +3978,22 @@ impl OpenFangKernel {
                 self.config.provider_urls.get(agent_provider.as_str()).cloned()
             };
 
+            let wire_api = manifest
+                .model
+                .wire_api
+                .unwrap_or_else(|| {
+                    if agent_provider == default_provider {
+                        self.config.default_model.wire_api
+                    } else {
+                        openfang_types::config::WireApi::ChatCompletions
+                    }
+                });
+
             let driver_config = DriverConfig {
                 provider: agent_provider.clone(),
                 api_key,
                 base_url,
+                wire_api,
             };
 
             drivers::create_driver(&driver_config).map_err(|e| {
@@ -3995,6 +4017,7 @@ impl OpenFangKernel {
                         .base_url
                         .clone()
                         .or_else(|| self.config.provider_urls.get(&fb.provider).cloned()),
+                    wire_api: fb.wire_api.unwrap_or(openfang_types::config::WireApi::ChatCompletions),
                 };
                 match drivers::create_driver(&config) {
                     Ok(d) => chain.push((d, fb.model.clone())),

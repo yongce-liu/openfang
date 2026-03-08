@@ -3,6 +3,7 @@
 //! Abstracts over multiple LLM providers (Anthropic, OpenAI, Ollama, etc.).
 
 use async_trait::async_trait;
+use openfang_types::config::WireApi;
 use openfang_types::message::{ContentBlock, Message, StopReason, TokenUsage};
 use openfang_types::tool::{ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
@@ -161,6 +162,9 @@ pub struct DriverConfig {
     pub api_key: Option<String>,
     /// Base URL override.
     pub base_url: Option<String>,
+    /// Wire protocol override for OpenAI-compatible providers.
+    #[serde(default)]
+    pub wire_api: WireApi,
 }
 
 /// SECURITY: Custom Debug impl redacts the API key.
@@ -170,6 +174,7 @@ impl std::fmt::Debug for DriverConfig {
             .field("provider", &self.provider)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("base_url", &self.base_url)
+            .field("wire_api", &self.wire_api)
             .finish()
     }
 }

@@ -38,7 +38,7 @@ const PROBE_TIMEOUT_SECS: u64 = 5;
 ///
 /// `base_url` should be the provider's base URL from the catalog (e.g.,
 /// `http://localhost:11434/v1` for Ollama, `http://localhost:8000/v1` for vLLM).
-pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
+pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str>) -> ProbeResult {
     let start = Instant::now();
 
     let client = match reqwest::Client::builder()
@@ -70,7 +70,19 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
         (format!("{trimmed}/models"), false)
     };
 
-    let resp = match client.get(&url).send().await {
+    let mut req = client.get(&url);
+    if let Some(key) = api_key {
+        if !key.is_empty() {
+            let lower = provider.to_lowercase();
+            req = if lower == "gemini" {
+                req.header("x-goog-api-key", key)
+            } else {
+                req.header("Authorization", format!("Bearer {key}"))
+            };
+        }
+    }
+
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             return ProbeResult {
@@ -223,7 +235,7 @@ mod tests {
     #[tokio::test]
     async fn test_probe_unreachable_returns_error() {
         // Probe a port that's almost certainly not running a server
-        let result = probe_provider("ollama", "http://127.0.0.1:19999").await;
+        let result = probe_provider("ollama", "http://127.0.0.1:19999", None).await;
         assert!(!result.reachable);
         assert!(result.error.is_some());
     }

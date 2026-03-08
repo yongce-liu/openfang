@@ -61,6 +61,7 @@ async fn start_test_server_with_provider(
             model: model.to_string(),
             api_key_env: api_key_env.to_string(),
             base_url: None,
+            wire_api: openfang_types::config::WireApi::ChatCompletions,
         },
         ..KernelConfig::default()
     };
@@ -689,6 +690,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
             model: "test-model".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            wire_api: openfang_types::config::WireApi::ChatCompletions,
         },
         ..KernelConfig::default()
     };
