@@ -4,8 +4,8 @@
 
 services:
   openfang:
-    build: .
-    # image: openfang:latest
+    image: righttimeair/openfang:latest
+    # build: .
     ports:
       - "[::]:14200:4200"
     volumes:
@@ -13,4 +13,5 @@ services:
     environment:
       - OPENFANG_LISTEN=${OPENFANG_LISTEN:-0.0.0.0:4200}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
     restart: unless-stopped
