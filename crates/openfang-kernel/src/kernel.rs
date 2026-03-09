@@ -155,6 +155,18 @@ pub struct OpenFangKernel {
     self_handle: OnceLock<Weak<OpenFangKernel>>,
 }
 
+fn auto_detected_openai_embedding_base_url(config: &KernelConfig) -> Option<String> {
+    if config.default_model.provider == "openai" {
+        config
+            .default_model
+            .base_url
+            .clone()
+            .or_else(|| config.provider_urls.get("openai").cloned())
+    } else {
+        config.provider_urls.get("openai").cloned()
+    }
+}
+
 /// Bounded in-memory delivery receipt tracker.
 /// Stores up to `MAX_RECEIPTS` most recent delivery receipts per agent.
 pub struct DeliveryTracker {
@@ -815,7 +827,13 @@ impl OpenFangKernel {
                 } else {
                     configured_model.as_str()
                 };
-                match create_embedding_driver("openai", model, "OPENAI_API_KEY", None) {
+                let custom_url = auto_detected_openai_embedding_base_url(&config);
+                match create_embedding_driver(
+                    "openai",
+                    model,
+                    "OPENAI_API_KEY",
+                    custom_url.as_deref(),
+                ) {
                     Ok(d) => {
                         info!("Embedding driver auto-detected: OpenAI");
                         Some(Arc::from(d))
@@ -5735,5 +5753,35 @@ mod tests {
         assert!(!caps
             .iter()
             .any(|c| matches!(c, Capability::ToolInvoke(name) if name == "shell_exec")));
+    }
+
+    #[test]
+    fn test_auto_detected_openai_embedding_base_url_prefers_default_model_url() {
+        let mut config = KernelConfig::default();
+        config.default_model.provider = "openai".to_string();
+        config.default_model.base_url = Some("http://proxy.example/v1".to_string());
+        config.provider_urls.insert(
+            "openai".to_string(),
+            "http://catalog.example/v1".to_string(),
+        );
+
+        assert_eq!(
+            auto_detected_openai_embedding_base_url(&config).as_deref(),
+            Some("http://proxy.example/v1")
+        );
+    }
+
+    #[test]
+    fn test_auto_detected_openai_embedding_base_url_falls_back_to_provider_url() {
+        let mut config = KernelConfig::default();
+        config.provider_urls.insert(
+            "openai".to_string(),
+            "http://catalog.example/v1".to_string(),
+        );
+
+        assert_eq!(
+            auto_detected_openai_embedding_base_url(&config).as_deref(),
+            Some("http://catalog.example/v1")
+        );
     }
 }
